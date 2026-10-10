@@ -1,95 +1,556 @@
 import os
 import logging
-import requests
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+import asyncio
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from openai import AsyncOpenAI
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
+# 👑 ВАШ TELEGRAM ID ВШИТ В АДМИНКУ И VIP-ДОСТУП
+ADMIN_TELEGRAM_ID = 985130256
+VIP_USER_IDS = [985130256]
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-users_db = {}
+ai_client = AsyncOpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com"
+)
 
-def ask_deepseek(prompt: str) -> str:
-    url = "https://api.deepseek.com/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", DEEPSEEK_API_KEY)
+whisper_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+user_data = {}
+DEFAULT_FREE_ATTEMPTS = 3
+
+TRANSLATIONS = {
+    "uk": {
+        "welcome": "Вітаю, **{name}**!\n\nЛаскаво просимо до **SMM Architecture AI Ultra**.\nСистема підтримує **перевірку ДЗ та аудит контенту**, тестування, **голосові повідомлення**, крос-постинг та SMM Академію.\n\n📊 **Статус:** {status}\n\nОберіть потрібний інструмент:",
+        "status_sub": "🟢 **PRO Ліцензія активна (VIP)**",
+        "status_free": "🟡 **Базовий доступ:** залишилось запитів: **{attempts}**",
+        "btn_mode_gen": "💼 Модуль: {fmt}",
+        "btn_mode_cons": "🏛 AI-Консультант (Аудит)",
+        "btn_trends": "📊 Аналітика трендів",
+        "btn_academy": "🎓 SMM Академія & Тести",
+        "btn_buy": "⚡️ PRO-доступ / Купити генерації",
+        "btn_insider": "💎 Модель окупальності",
+        "btn_ref": "🎁 Реферальна програма",
+        "btn_lang": "🌐 Мова: Українська",
+        "btn_back": "◀️ Назад у Головне меню",
+        "out_of_limits": "⚠️ **Ліміт базового вичерпано.**\n\nЗаберіть спец-пакет або активуйте PRO-підписку!",
+        "voice_processing": "🎙️ **Голосове повідомлення отримано!** Розпізнаю мову та формую аналіз...",
+        "ref_text": "🎁 **РЕФЕРАЛЬНА ПРОГРАМА**\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\nЗапрошуйте колег та отримуйте **+5 безкоштовних генерацій** за кожного друга!\n\nВаше реферальне посилання:\n`{ref_link}`\n\nЗапрошено друзів: **{ref_count}**",
+        "lang_menu": "🌐 **Оберіть мову / Select language:**"
+    },
+    "ru": {
+        "welcome": "Здравствуйте, **{name}**!\n\nДобро пожаловать в **SMM Architecture AI Ultra**.\nСистема поддерживает **проверку ДЗ и аудит контента**, тестирование, **голосовые сообщения**, кросс-постинг и SMM Академию.\n\n📊 **Статус:** {status}\n\nВыберите нужный инструмент:",
+        "status_sub": "🟢 **PRO Лицензия активна (VIP)**",
+        "status_free": "🟡 **Базовый доступ:** осталось запросов: **{attempts}**",
+        "btn_mode_gen": "💼 Модуль: {fmt}",
+        "btn_mode_cons": "🏛 AI-Консультант (Аудит)",
+        "btn_trends": "📊 Аналитика трендов",
+        "btn_academy": "🎓 SMM Академия & Тесты",
+        "btn_buy": "⚡️ PRO-доступ / Купить генерации",
+        "btn_insider": "💎 Модель окупаемости",
+        "btn_ref": "🎁 Реферальная программа",
+        "btn_lang": "🌐 Язык: Русский",
+        "btn_back": "◀️ Назад в Главное меню",
+        "out_of_limits": "⚠️ **Лимит базового доступа исчерпан.**\n\nЗаберите спец-пакет или активируйте PRO-подписку!",
+        "voice_processing": "🎙️ **Голосовое сообщение получено!** Расшифровываю речь и создаю разбор...",
+        "ref_text": "🎁 **РЕФЕРАЛЬНАЯ ПРОГРАММА**\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\nПриглашайте коллег и получайте **+5 бесплатных генераций** за каждого друга!\n\nВаша реферальная ссылка:\n`{ref_link}`\n\nПриглашено друзей: **{ref_count}**",
+        "lang_menu": "🌐 **Выберите язык / Select language:**"
+    },
+    "en": {
+        "welcome": "Hello, **{name}**!\n\nWelcome to **SMM Architecture AI Ultra**.\nNow supporting **Homework Grading & Content Audit**, interactive quizzes, **voice notes**, and SMM Academy.\n\n📊 **Status:** {status}\n\nSelect a tool below:",
+        "status_sub": "🟢 **PRO License Active (VIP)**",
+        "status_free": "🟡 **Basic Access:** remaining requests: **{attempts}**",
+        "btn_mode_gen": "💼 Module: {fmt}",
+        "btn_mode_cons": "🏛 AI-Consultant (Audit)",
+        "btn_trends": "📊 Market Analytics",
+        "btn_academy": "🎓 SMM Academy & Quizzes",
+        "btn_buy": "⚡️ Activate PRO / Buy Credits",
+        "btn_insider": "💎 ROI Model",
+        "btn_ref": "🎁 Referral Program",
+        "btn_lang": "🌐 Language: English",
+        "btn_back": "◀️ Back to Main Menu",
+        "out_of_limits": "⚠️ **Basic access limit reached.**\n\nGrab a promo pack or activate PRO subscription!",
+        "voice_processing": "🎙️ **Voice note received!** Transcribing and analyzing...",
+        "ref_text": "🎁 **REFERRAL PROGRAM**\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\nInvite colleagues and get **+5 free generations** per friend!\n\nYour referral link:\n`{ref_link}`\n\nInvited friends: **{ref_count}**",
+        "lang_menu": "🌐 **Select language:**"
     }
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "system",
-                "content": "Ты профессиональный SMM-специалист и копирайтер. Помогай писать яркие, вовлекающие посты."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "stream": False
-    }
-    
+}
+
+FORMATS = {
+    "fmt_audit_hw": "📝 Перевірка ДЗ / Аудит вашого тексту чи Reels",
+    "fmt_omni": "🌐 Кросс-постинг (Instagram + FB + TG + LinkedIn + X)",
+    "fmt_abtest": "🧪 A/B Тестирование хуков (3 психотипа ЦА)",
+    "fmt_midjourney": "🎨 Midjourney / DALL-E Промпты + ТЗ",
+    "fmt_instagram": "📸 Instagram: Пост + Визуальная сетка",
+    "fmt_reels": "🎬 Reels / TikTok: Сценарий + Раскадровка",
+    "fmt_strategy": "📈 Стратегия развития и воронка продаж"
+}
+
+def get_user_info(user_id: int):
+    if user_id not in user_data:
+        user_data[user_id] = {
+            "attempts": DEFAULT_FREE_ATTEMPTS,
+            "sub_until": None,
+            "format": "fmt_audit_hw",
+            "mode": "generation",
+            "lang": "uk",
+            "ref_count": 0,
+            "referred_by": None,
+            "attempts_spent_at": None,
+            "promos_sent": []
+        }
+    return user_data[user_id]
+
+def get_lang(user_id: int):
+    return get_user_info(user_id)["lang"]
+
+def is_sub_active(user_id: int, user_info: dict) -> bool:
+    if user_id in VIP_USER_IDS:
+        return True
+    if user_info["sub_until"] and user_info["sub_until"] > datetime.now():
+        return True
+    user_info["sub_until"] = None
+    return False
+
+async def notify_admin(error_text: str, user_id: int = None):
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            return result['choices'][0]['message']['content']
-        else:
-            return "⚠️ Ошибка обращения к нейросети. Попробуйте позже."
+        msg = f"🚨 **ОШИБКА В БОТЕ**\nUser: `{user_id}`\n\n`{error_text[:3000]}`"
+        await bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=msg, parse_mode="Markdown")
     except Exception as e:
-        logging.error(f"DeepSeek API Error: {e}")
-        return "⚠️ Произошла ошибка при генерации текста."
+        logging.error(f"Failed to notify admin: {e}")
 
-@dp.message(CommandStart())
-async def cmd_start(message: Message):
-    user_id = message.from_user.id
-    if user_id not in users_db:
-        users_db[user_id] = {"generations": 3, "premium": False}
-        
-    await message.answer(
-        f"👋 Привет, **{message.from_user.first_name}**!\n\n"
-        "Я твой личный **SMM-помощник и AI-копирайтер**.\n\n"
-        "✍️ Просто отправь мне тему или задачу текстом!\n"
-        f"🎁 У тебя есть бесплатных генераций: **{users_db[user_id]['generations']}**.",
-        parse_mode="Markdown"
+def main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    u = get_user_info(user_id)
+    lang = u["lang"]
+    t = TRANSLATIONS[lang]
+    
+    current_format = FORMATS.get(u['format'], '📝 Перевірка ДЗ / Аудит')
+    mode_text = t["btn_mode_cons"] if u['mode'] == "consultant" else t["btn_mode_gen"].format(fmt=current_format)
+    
+    buttons = [
+        [InlineKeyboardButton(text=mode_text, callback_data="toggle_mode_menu")],
+        [InlineKeyboardButton(text=t["btn_academy"], callback_data="academy_menu")],
+        [InlineKeyboardButton(text=t["btn_trends"], callback_data="trends_menu")],
+        [InlineKeyboardButton(text=t["btn_buy"], callback_data="buy_menu")],
+        [InlineKeyboardButton(text=t["btn_ref"], callback_data="ref_menu")],
+        [InlineKeyboardButton(text=t["btn_lang"], callback_data="lang_menu")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def formats_keyboard(lang: str) -> InlineKeyboardMarkup:
+    t = TRANSLATIONS[lang]
+    buttons = [
+        [InlineKeyboardButton(text="🏛 AI-Консультант (Стратегический аудит)", callback_data="set_mode_consultant")]
+    ]
+    for code, name in FORMATS.items():
+        buttons.append([InlineKeyboardButton(text=name, callback_data=f"set_fmt_{code}")])
+    buttons.append([InlineKeyboardButton(text=t["btn_back"], callback_data="back_to_main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def buy_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📦 Пакет (10 генераций) — 50 ⭐", callback_data="buy_pack_50")],
+        [InlineKeyboardButton(text="🔥 PRO 1 Месяц — 500 ⭐ (вместо ~700 ⭐~)", callback_data="buy_sub_month")],
+        [InlineKeyboardButton(text="👑 VIP ГОДОВОЙ БЕЗЛИМИТ — 1000 ⭐ (вместо ~3500 ⭐~)", callback_data="buy_sub_year")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]
+    ])
+
+# --- SMM ACADEMY & МАРКЕТИНГ-ТЕСТЫ ---
+
+@dp.callback_query(F.data == "academy_menu")
+async def academy_menu(callback: types.CallbackQuery):
+    text = (
+        "🎓 **SMM ACADEMY: Обучение & Интерактивные тесты**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Выберите раздел для обучения или пройдите тестирование знаний:"
     )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📘 Экспресс-Курс (4 Урока)", callback_data="course_menu")],
+        [InlineKeyboardButton(text="🧪 Пройти Маркетинг-Тест", callback_data="test_menu")],
+        [InlineKeyboardButton(text="📝 Сдать ДЗ / Проверить текст", callback_data="set_fmt_fmt_audit_hw")],
+        [InlineKeyboardButton(text="◀️ Назад в Главное меню", callback_data="back_to_main")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
 
-@dp.message(F.text & ~F.text.startswith("/"))
-async def handle_text(message: Message):
+@dp.callback_query(F.data == "course_menu")
+async def course_menu(callback: types.CallbackQuery):
+    text = "📚 **Учебные модули:**\nВыберите урок для изучения:"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📘 Урок 1: Алгоритмы & Вирусность", callback_data="lesson_1")],
+        [InlineKeyboardButton(text="🤖 Урок 2: Эффективный AI-промптинг", callback_data="lesson_2")],
+        [InlineKeyboardButton(text="💰 Урок 3: Поиск клиентов и продажи", callback_data="lesson_3")],
+        [InlineKeyboardButton(text="🚀 Урок 4: Построение воронок", callback_data="lesson_4")],
+        [InlineKeyboardButton(text="◀️ Назад в Академию", callback_data="academy_menu")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "test_menu")
+async def test_menu(callback: types.CallbackQuery):
+    text = (
+        "🧪 **Центр тестирования знаний SMM:**\n\n"
+        "Выберите тест для проверки ваших практических навыков:"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎯 Тест 1: Хуки и вирусность Reels", callback_data="quiz_1")],
+        [InlineKeyboardButton(text="🧠 Тест 2: Психология ЦА и офферы", callback_data="quiz_2")],
+        [InlineKeyboardButton(text="💰 Тест 3: Продажи и чек на услуги", callback_data="quiz_3")],
+        [InlineKeyboardButton(text="◀️ Назад в Академию", callback_data="academy_menu")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("quiz_"))
+async def show_quiz(callback: types.CallbackQuery):
+    quiz_type = callback.data
+    if quiz_type == "quiz_1":
+        text = (
+            "❓ **Вопрос 1/3 (Хуки):**\n"
+            "Какая главная задача первых 3 секунд вирусного Reels?\n\n"
+            "A) Поздороваться с подписчиками и представиться\n"
+            "B) Вызвать эмоцию, интригу или показать проблему (зацепить глаз)\n"
+            "C) Сразу предложить купить продукт"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Вариант A", callback_data="quiz_ans_wrong")],
+            [InlineKeyboardButton(text="Вариант B (Правильно!)", callback_data="quiz_ans_right_1")],
+            [InlineKeyboardButton(text="Вариант C", callback_data="quiz_ans_wrong")]
+        ])
+    elif quiz_type == "quiz_2":
+        text = (
+            "❓ **Вопрос:** Какой оффер сработает лучше всего для холодного клиента?\n\n"
+            "A) «Купите наш курс за $500»\n"
+            "B) «Качественный SMM для всех»\n"
+            "C) «Заберите бесплатный аудит профиля и пошаговый план роста охватов на 30%»"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Вариант A", callback_data="quiz_ans_wrong")],
+            [InlineKeyboardButton(text="Вариант B", callback_data="quiz_ans_wrong")],
+            [InlineKeyboardButton(text="Вариант C (Правильно!)", callback_data="quiz_ans_right_2")]
+        ])
+    else:
+        text = (
+            "❓ **Вопрос:** Какой формат контента удерживает внимание аудитории лучше всего в 2026 году?\n\n"
+            "A) Длинные сухие посты без визуального ряда\n"
+            "B) Динамичные карусели со структурой слайдов и детальные Reels\n"
+            "C) Картинка из фотостока без текста"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Вариант A", callback_data="quiz_ans_wrong")],
+            [InlineKeyboardButton(text="Вариант B (Правильно!)", callback_data="quiz_ans_right_3")],
+            [InlineKeyboardButton(text="Вариант C", callback_data="quiz_ans_wrong")]
+        ])
+    
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("quiz_ans_"))
+async def process_quiz_ans(callback: types.CallbackQuery):
+    if "right" in callback.data:
+        ans_text = (
+            "🎉 **ВЕРНО! Отличный результат!**\n\n"
+            "Вы отлично понимаете современные механики маркетинга.\n\n"
+            "💡 Теперь примените свои знания на практике — создайте свой первый вирусный сценарий или доверьте боту проверку вашего текста!"
+        )
+    else:
+        ans_text = (
+            "❌ **Не совсем так.**\n\n"
+            "В современном маркетинге решают первые секунды внимания и битие в конкретную боль клиента без формальностей.\n\n"
+            "📚 Рекомендуем пройти уроки в нашей `SMM Академии`!"
+        )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Отправить текст на проверку (ДЗ)", callback_data="set_fmt_fmt_audit_hw")],
+        [InlineKeyboardButton(text="◀️ В Академию", callback_data="academy_menu")]
+    ])
+    await callback.message.edit_text(ans_text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data.in_({"lesson_1", "lesson_2", "lesson_3", "lesson_4"}))
+async def show_lesson(callback: types.CallbackQuery):
+    lessons = {
+        "lesson_1": "📘 **УРОК 1: Алгоритмы & Вирусный контент**\n\n• **Хук (0-3 сек):** Визуал и заголовок должны зацепить глаз.\n• **Польза:** 3 четких решения без «воды».\n• **CTA:** Просите написать кодовое слово в директ.",
+        "lesson_2": "🤖 **УРОК 2: Искусство работы с AI (Промптинг)**\n\nФормула промпта: **[Ниша] + [ЦА] + [Проблема] + [Формат]**.\nИспользуйте голосовой ввод для подробного ТЗ!",
+        "lesson_3": "💰 **УРОК 3: Поиск клиентов за 3 дня**\n\n1. Найдите 5 бизнесов.\n2. Сделайте бесплатный аудит через наш `AI-Консультант`.\n3. Предложите ведение за $150–$300/мес.",
+        "lesson_4": "🚀 **УРОК 4: Авто-воронки продаж**\n\nСоздавайте карусели с обещанием полезного файла за комментарий и настраивайте авто-ответы."
+    }
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Оформить PRO и применить", callback_data="buy_menu")],
+        [InlineKeyboardButton(text="◀️ К списку уроков", callback_data="course_menu")]
+    ])
+    await callback.message.edit_text(lessons[callback.data], reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+# --- СТАРТ И РЕФЕРАЛЫ ---
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
     user_id = message.from_user.id
+    u = get_user_info(user_id)
     
-    if user_id not in users_db:
-        users_db[user_id] = {"generations": 3, "premium": False}
-        
-    user_data = users_db[user_id]
-    
-    if user_data["generations"] <= 0 and not user_data["premium"]:
-        await message.answer("❌ У вас закончились бесплатные генерации!")
+    args = message.text.split()
+    if len(args) > 1 and not u["referred_by"]:
+        try:
+            referrer_id = int(args[1])
+            if referrer_id != user_id and referrer_id in user_data:
+                u["referred_by"] = referrer_id
+                ref_user = user_data[referrer_id]
+                ref_user["attempts"] += 5
+                ref_user["ref_count"] += 1
+                await bot.send_message(chat_id=referrer_id, text="🎉 **Новый реферал!** Вам начислено **+5 генераций**!", parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Ref error: {e}")
+
+    lang = u["lang"]
+    t = TRANSLATIONS[lang]
+    sub_active = is_sub_active(user_id, u)
+    status_str = t["status_sub"] if sub_active else t["status_free"].format(attempts=u['attempts'])
+    await message.answer(t["welcome"].format(name=message.from_user.full_name, status=status_str), reply_markup=main_menu_keyboard(user_id), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "ref_menu")
+async def ref_menu(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    u = get_user_info(user_id)
+    lang = u["lang"]
+    t = TRANSLATIONS[lang]
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+    text = t["ref_text"].format(ref_link=ref_link, ref_count=u["ref_count"])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t["btn_back"], callback_data="back_to_main")]])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    u = get_user_info(user_id)
+    lang = u["lang"]
+    t = TRANSLATIONS[lang]
+    sub_active = is_sub_active(user_id, u)
+    status_str = t["status_sub"] if sub_active else t["status_free"].format(attempts=u['attempts'])
+    await callback.message.edit_text(t["welcome"].format(name=callback.from_user.full_name, status=status_str), reply_markup=main_menu_keyboard(user_id), parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "toggle_mode_menu")
+async def choose_format_menu(callback: types.CallbackQuery):
+    lang = get_lang(callback.from_user.id)
+    await callback.message.edit_text("💼 **Выберите модуль:**", reply_markup=formats_keyboard(lang), parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("set_fmt_"))
+async def set_format(callback: types.CallbackQuery):
+    code = callback.data.replace("set_fmt_", "")
+    user_id = callback.from_user.id
+    u = get_user_info(user_id)
+    u["format"] = code
+    u["mode"] = "generation"
+    await callback.message.edit_text(f"✅ **Модуль активирован:**\n{FORMATS[code]}\n\nТеперь отправьте свой текст или ДЗ на проверку!", reply_markup=main_menu_keyboard(user_id), parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "set_mode_consultant")
+async def set_mode_consultant(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    u = get_user_info(user_id)
+    u["mode"] = "consultant"
+    await callback.message.edit_text("🏛 **Режим: AI-Консультант (Стратегический аудит)**\n\nОтправьте текст или надиктуйте голосовое сообщение!", reply_markup=main_menu_keyboard(user_id), parse_mode="Markdown")
+    await callback.answer()
+
+# --- ОПЛАТА И ЯЗЫКИ ---
+
+@dp.callback_query(F.data == "lang_menu")
+async def lang_menu(callback: types.CallbackQuery):
+    lang = get_lang(callback.from_user.id)
+    t = TRANSLATIONS[lang]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🇺🇦 Українська", callback_data="set_lang_uk")],
+        [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang_ru")],
+        [InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang_en")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]
+    ])
+    await callback.message.edit_text(t["lang_menu"], reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("set_lang_"))
+async def set_language(callback: types.CallbackQuery):
+    lang_code = callback.data.replace("set_lang_", "")
+    u = get_user_info(callback.from_user.id)
+    u["lang"] = lang_code
+    t = TRANSLATIONS[lang_code]
+    sub_active = is_sub_active(callback.from_user.id, u)
+    status_str = t["status_sub"] if sub_active else t["status_free"].format(attempts=u['attempts'])
+    await callback.message.edit_text(t["welcome"].format(name=callback.from_user.full_name, status=status_str), reply_markup=main_menu_keyboard(callback.from_user.id), parse_mode="Markdown")
+    await callback.answer()
+
+@dp.message(Command("buy"))
+@dp.callback_query(F.data == "buy_menu")
+async def send_buy_menu(event: types.Message | types.CallbackQuery):
+    message = event if isinstance(event, types.Message) else event.message
+    text = (
+        "🔥 **СПЕЦИАЛЬНОЕ ПРЕДЛОЖЕНИЕ: ОГРАНИЧЕННЫЙ ДОСТУП**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "• **Пакет 10 генераций:** 50 ⭐\n"
+        "• **PRO Подписка (1 месяц):** ~~700 ⭐~~ ➡️ **500 ⭐** *(Скидка -28%)*\n"
+        "• **VIP Безлимит (12 месяцев):** ~~3500 ⭐~~ ➡️ **1000 ⭐** *(Максимальная экономия)*\n\n"
+        "Выберите подходящий вариант:"
+    )
+    kb = buy_keyboard()
+    if isinstance(event, types.Message):
+        await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    else:
+        await message.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+        await event.answer()
+
+@dp.callback_query(F.data == "buy_pack_50")
+async def invoice_pack_50(callback: types.CallbackQuery):
+    prices = [LabeledPrice(label="Пакет 10 генераций", amount=50)]
+    await bot.send_invoice(chat_id=callback.message.chat.id, title="Пакет (10 генераций)", description="Пополнение баланса.", payload="pack_50", provider_token="", currency="XTR", prices=prices)
+    await callback.answer()
+
+@dp.callback_query(F.data == "buy_sub_month")
+async def invoice_sub_month(callback: types.CallbackQuery):
+    prices = [LabeledPrice(label="PRO Месяц", amount=500)]
+    await bot.send_invoice(chat_id=callback.message.chat.id, title="👑 PRO Подписка (30 дней)", description="Неограниченный доступ ко всем модулям.", payload="sub_month", provider_token="", currency="XTR", prices=prices)
+    await callback.answer()
+
+@dp.callback_query(F.data == "buy_sub_year")
+async def invoice_sub_year(callback: types.CallbackQuery):
+    prices = [LabeledPrice(label="VIP Год", amount=1000)]
+    await bot.send_invoice(chat_id=callback.message.chat.id, title="🔥 VIP Годовой Лимит (365 дней)", description="Безлимитный доступ на 1 год.", payload="sub_year", provider_token="", currency="XTR", prices=prices)
+    await callback.answer()
+
+@dp.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def process_pay(message: types.Message):
+    u = get_user_info(message.from_user.id)
+    payload = message.successful_payment.invoice_payload
+    if payload in ("pack_50", "pack_30"):
+        u["attempts"] += 10
+        await message.answer("🎉 **Оплата прошла успешно!** Вам зачислено +10 генераций.", parse_mode="Markdown")
+    elif payload == "sub_month":
+        u["sub_until"] = datetime.now() + timedelta(days=30)
+        await message.answer("👑 **PRO-лицензия активирована на 30 дней!**", parse_mode="Markdown")
+    elif payload == "sub_year":
+        u["sub_until"] = datetime.now() + timedelta(days=365)
+        await message.answer("🔥 **VIP Годовая лицензия активирована!**", parse_mode="Markdown")
+
+# --- ОБРАБОТКА ГОЛОСА И AI ЛОГИКА С АУДИТОМ ДЗ ---
+
+@dp.message(F.voice)
+async def process_voice_message(message: types.Message):
+    user_id = message.from_user.id
+    u = get_user_info(user_id)
+    lang = u["lang"]
+    t = TRANSLATIONS[lang]
+    sub_active = is_sub_active(user_id, u)
+
+    if not sub_active and u["attempts"] <= 0:
+        await message.answer(t["out_of_limits"], parse_mode="Markdown")
         return
 
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    ai_response = ask_deepseek(message.text)
-    
-    if not user_data["premium"]:
-        user_data["generations"] -= 1
+    status_msg = await message.answer(t["voice_processing"])
+
+    try:
+        file_info = await bot.get_file(message.voice.file_id)
+        ogg_file = f"voice_{user_id}_{message.message_id}.ogg"
+        await bot.download_file(file_info.file_path, ogg_file)
+
+        with open(ogg_file, "rb") as audio_file:
+            transcript = await whisper_client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        recognized_text = transcript.text
+        os.remove(ogg_file)
+
+        await status_msg.edit_text(f"🗣 **Распознанный текст:**\n_«{recognized_text}»_\n\n🧠 Провожу детальный анализ...")
+        await process_ai_logic(user_id, recognized_text, status_msg, sub_active, u)
+
+    except Exception as e:
+        logging.error(f"Voice Error: {e}")
+        await notify_admin(str(e), user_id)
+        await status_msg.edit_text("⚠️ Ошибка распознавания голосового файла.")
+
+@dp.message(F.text)
+async def generate_text(message: types.Message):
+    user_id = message.from_user.id
+    u = get_user_info(user_id)
+    lang = u["lang"]
+    t = TRANSLATIONS[lang]
+    sub_active = is_sub_active(user_id, u)
+
+    if not sub_active and u["attempts"] <= 0:
+        if not u["attempts_spent_at"]:
+            u["attempts_spent_at"] = datetime.now()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 АКЦИЯ: 10 генераций за 30 ⭐", callback_data="buy_pack_30")],
+            [InlineKeyboardButton(text="👑 PRO Безлимит на месяц (500 ⭐)", callback_data="buy_sub_month")]
+        ])
+        await message.answer(t["out_of_limits"], reply_markup=kb, parse_mode="Markdown")
+        return
+
+    status_msg = await message.answer("🧠 Аналитический центр обрабатывает ваш запрос...")
+    await process_ai_logic(user_id, message.text, status_msg, sub_active, u)
+
+async def process_ai_logic(user_id: int, user_prompt: str, status_msg: types.Message, sub_active: bool, u: dict):
+    if not sub_active:
+        u["attempts"] -= 1
+
+    lang = u["lang"]
+    t = TRANSLATIONS[lang]
+
+    if u["mode"] == "consultant":
+        system_prompt = f"You are an elite CMO. Conduct a strategic audit. Answer strictly in language code '{lang}'."
+    else:
+        format_type = u['format']
+        system_prompts = {
+            "fmt_audit_hw": f"Ты строгий, профессиональный SMM Арт-директор и Ментор. Проведи глубокий аудит текста/ДЗ пользователя: 1) Поставь оценку от 1 до 10 по шкале завлекаемости (Хук, Полезнасть, CTA), 2) Выдели сильные стороны, 3) Укажи на ошибки и слабые места, 4) Напиши идеальную, доработанную версию текста. Отвечай на '{lang}'.",
+            "fmt_omni": f"Ты SMM-архитектор. Адаптируй тему под 5 платформ: Instagram, Facebook, Telegram, LinkedIn, X. Отвечай на '{lang}'.",
+            "fmt_abtest": f"Ты таргетолог. Создай 3 A/B варианта заголовка: 1) Боль/FOMO, 2) Выгода/ROI, 3) Интрига. Отвечай на '{lang}'.",
+            "fmt_midjourney": f"Ты AI-арт директор. Напиши 2 детальных англоязычных промпта для Midjourney v6 (--ar 9:16 и --ar 1:1) + описание.",
+            "fmt_instagram": f"Ты Instagram-стратег. Создай пост и визуал-концепцию. Отвечай на '{lang}'.",
+            "fmt_reels": f"Ты сценарист Reels. Напиши вирусный сценарий с таймкодами и хуком. Отвечай на '{lang}'.",
+            "fmt_strategy": f"Ты CMO. Разработай стратегию и воронку продаж. Отвечай на '{lang}'."
+        }
+        system_prompt = system_prompts.get(format_type, system_prompts["fmt_audit_hw"])
+
+    try:
+        response = await ai_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+        ai_text = response.choices[0].message.content
+        balance_info = t["status_sub"] if sub_active else t["status_free"].format(attempts=u['attempts'])
         
-    await message.answer(
-        f"✨ **Результат генерации:**\n\n{ai_response}\n\n"
-        f"📊 Осталось попыток: {user_data['generations'] if not user_data['premium'] else 'Безлимит ∞'}",
-        parse_mode="Markdown"
-    )
+        await status_msg.edit_text(
+            f"📋 **Анализ и разбор контента:**\n\n{ai_text}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━\n{balance_info}",
+            reply_markup=main_menu_keyboard(user_id),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        await notify_admin(str(e), user_id)
+        if not sub_active:
+            u["attempts"] += 1
+        await status_msg.edit_text("⚠️ Временный сбой API. Попробуйте еще раз.")
 
 async def main():
-    print("Бот запущен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
