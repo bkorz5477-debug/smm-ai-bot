@@ -1,2 +1,4 @@
-aiogram>=3.0.0
+aiogram>=3.13.0
 openai>=1.0.0
+tzdata
+asyncpg>=0.29.0
